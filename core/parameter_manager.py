@@ -38,6 +38,50 @@ def get_exposed_parameters_from_tree(node_tree):
                 }
     return attributes
 
+def configure_custom_property_on_object(obj, prop_key, val, socket=None, description=""):
+    """
+    Sets custom property value and configures its metadata (default value, limits, subtype)
+    using Blender's id_properties_ui to ensure the default value accurately reflects
+    the parameter's initial socket value.
+    """
+    obj[prop_key] = val
+    try:
+        ui = obj.id_properties_ui(prop_key)
+        kwargs = {"default": val}
+        if description:
+            kwargs["description"] = description
+
+        sock_cls = type(socket).__name__ if socket else ""
+        sock_type = getattr(socket, "type", "") if socket else ""
+
+        if sock_type == 'RGBA' or (isinstance(val, (list, tuple)) and len(val) in (3, 4)):
+            kwargs["subtype"] = 'COLOR'
+            kwargs["min"] = 0.0
+            kwargs["max"] = 1.0
+            kwargs["soft_min"] = 0.0
+            kwargs["soft_max"] = 1.0
+            kwargs["default"] = list(val)
+        elif 'Factor' in sock_cls or (socket and getattr(socket, "name", "").lower() in ('alpha', 'roughness', 'metallic', 'fac', 'weight')):
+            kwargs["min"] = 0.0
+            kwargs["max"] = 1.0
+            kwargs["soft_min"] = 0.0
+            kwargs["soft_max"] = 1.0
+            kwargs["default"] = float(val)
+        elif isinstance(val, (int, float)):
+            kwargs["default"] = float(val)
+            kwargs["soft_min"] = 0.0
+            kwargs["soft_max"] = max(10.0, float(val) * 2.0)
+
+        ui.update(**kwargs)
+    except Exception:
+        if "_RNA_UI" not in obj:
+            obj["_RNA_UI"] = {}
+        obj["_RNA_UI"][prop_key] = {
+            "default": val,
+            "min": 0.0 if isinstance(val, (int, float)) else None,
+            "max": 1.0 if isinstance(val, (int, float)) else None,
+        }
+
 def expose_socket_as_parameter(node_tree, target_node, target_socket, param_name, prop_key):
     """
     Exposes an arbitrary input socket in the Master Material by inserting
@@ -64,9 +108,11 @@ def expose_socket_as_parameter(node_tree, target_node, target_socket, param_name
         label=param_name
     )
     
-    # Link output: Color if vector/color, Fac if float
-    if target_socket.type in ('RGBA', 'VECTOR'):
+    # Link output: Color if RGBA, Vector if vector, Fac if float
+    if target_socket.type == 'RGBA':
         safe_link(node_tree.links, attr_node.outputs['Color'], target_socket)
+    elif target_socket.type == 'VECTOR':
+        safe_link(node_tree.links, attr_node.outputs['Vector'], target_socket)
     else:
         safe_link(node_tree.links, attr_node.outputs['Fac'], target_socket)
         

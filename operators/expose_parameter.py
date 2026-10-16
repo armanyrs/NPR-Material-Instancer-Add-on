@@ -11,6 +11,7 @@ from ..core.parameter_manager import (
     get_socket_default_value,
     cleanup_custom_property_from_objects,
     purge_all_unused_properties,
+    configure_custom_property_on_object,
 )
 
 def _clean_socket_name(sock_name, node):
@@ -50,14 +51,93 @@ def _clean_socket_name(sock_name, node):
     # Default fallback: socket name
     return s if s not in ('Fac', 'Value') else f"{node_type_clean} Factor"
 
-def _sanitize_key(name):
-    """Sanitizes name to mi_key without hardcoded npr_ prefix or node duplication."""
-    clean = re.sub(r'[^a-zA-Z0-9_]', '_', name.lower().strip())
-    clean = clean.strip('_')
-    clean = re.sub(r'_+', '_', clean)
-    if not clean.startswith("mi_"):
-        clean = f"mi_{clean}"
+def _format_property_key(name):
+    """Formats param_name to mi_key with spaces converted to underscores, preserving mi_ prefix."""
+    if not name or not name.strip():
+        return ""
+    clean = name.strip().replace(" ", "_")
+    if not clean.lower().startswith("mi_"):
+        clean = f"mi_{clean.lower()}"
+    else:
+        clean = clean.lower()
     return clean
+
+_is_syncing_param_key = False
+
+def _on_param_name_update(self, context):
+    global _is_syncing_param_key
+    if _is_syncing_param_key:
+        return
+    # Auto-sync property_key with mi_ prefix unless user has manually overridden it
+    if not self.is_custom_key:
+        _is_syncing_param_key = True
+        try:
+            self.property_key = _format_property_key(self.param_name)
+        finally:
+            _is_syncing_param_key = False
+
+def _on_property_key_update(self, context):
+    global _is_syncing_param_key
+    if _is_syncing_param_key:
+        return
+    # Automatically convert any spaces in property_key to underscores
+    if " " in self.property_key:
+        _is_syncing_param_key = True
+        try:
+            self.property_key = self.property_key.replace(" ", "_")
+        finally:
+            _is_syncing_param_key = False
+
+    auto_val = _format_property_key(self.param_name)
+    # If the user clears the property_key or matches auto_val, resume auto-sync
+    if not self.property_key or self.property_key == auto_val:
+        self.is_custom_key = False
+        if not self.property_key and self.param_name:
+            _is_syncing_param_key = True
+            try:
+                self.property_key = auto_val
+            finally:
+                _is_syncing_param_key = False
+    else:
+        self.is_custom_key = True
+
+def get_target_node_tree(context, node=None):
+    """Finds the active shader node tree being edited."""
+    sdata = getattr(context, "space_data", None)
+    if sdata and getattr(sdata, "tree_type", "") == 'ShaderNodeTree' and getattr(sdata, "edit_tree", None):
+        return sdata.edit_tree
+    if node and hasattr(node, "id_data"):
+        if isinstance(node.id_data, bpy.types.Material) and node.id_data.node_tree:
+            return node.id_data.node_tree
+        if hasattr(node.id_data, "node_tree"):
+            return node.id_data.node_tree
+    obj = getattr(context, "active_object", None)
+    if obj and getattr(obj, "active_material", None) and obj.active_material.node_tree:
+        return obj.active_material.node_tree
+    mat = bpy.data.materials.get("M_Master_NPR") or bpy.data.materials.get("M_Master_Material")
+    if mat and mat.node_tree:
+        return mat.node_tree
+    return None
+
+def get_existing_parameters_in_tree(node_tree):
+    """
+    Returns (names, keys) sets of existing parameters in the given shader node tree.
+    Names are taken from node.label or node.attribute_name.
+    Keys are taken from node.attribute_name.
+    """
+    names = []
+    keys = []
+    if not node_tree or not hasattr(node_tree, "nodes"):
+        return names, keys
+    for n in node_tree.nodes:
+        if n.type == 'ATTRIBUTE' and getattr(n, "attribute_type", "") == 'OBJECT':
+            label = (n.label or n.attribute_name or "").strip()
+            if label:
+                names.append(label)
+            k = getattr(n, "attribute_name", "").strip()
+            if k:
+                keys.append(k)
+    return names, keys
 
 def get_active_shader_node(context):
     """Finds the currently active node in Shader Editor or active material."""
@@ -99,9 +179,11 @@ class NPR_OT_ExposeNodeAsParameter(bpy.types.Operator):
     bl_options = {'REGISTER', 'UNDO'}
 
     param_name: bpy.props.StringProperty(
-        name="Parameter Name",
+        name="Param Name",
         description="Display name for the parameter in the Inspector",
-        default="New Parameter"
+        default="",
+        options={'SKIP_SAVE'},
+        update=_on_param_name_update
     )
     
     target_socket_id: bpy.props.EnumProperty(
@@ -111,9 +193,17 @@ class NPR_OT_ExposeNodeAsParameter(bpy.types.Operator):
     )
     
     property_key: bpy.props.StringProperty(
-        name="Custom Property Key",
-        description="Internal attribute identifier on objects (e.g., mi_base_color)",
-        default="mi_param"
+        name="Property Key",
+        description="Internal attribute identifier on objects (e.g., Base_Color or custom key)",
+        default="",
+        options={'SKIP_SAVE'},
+        update=_on_property_key_update
+    )
+
+    is_custom_key: bpy.props.BoolProperty(
+        name="Is Custom Key",
+        default=False,
+        options={'SKIP_SAVE'}
     )
 
     @classmethod
@@ -127,19 +217,27 @@ class NPR_OT_ExposeNodeAsParameter(bpy.types.Operator):
             self.report({'WARNING'}, "No active node selected.")
             return {'CANCELLED'}
 
-        # Auto-suggest clean parameter name
-        first_sock = node.inputs[0] if len(node.inputs) > 0 else None
-        sock_name = first_sock.name if first_sock else ""
-        suggested_name = _clean_socket_name(sock_name, node)
-            
-        self.param_name = suggested_name
-        self.property_key = _sanitize_key(suggested_name)
+        # Reset fields so Param Name starts empty every time
+        self.is_custom_key = False
+        self.param_name = ""
+        self.property_key = ""
+
+        # Default to the first enabled socket if available
+        for sock in node.inputs:
+            if sock.enabled:
+                self.target_socket_id = sock.identifier
+                break
 
         return context.window_manager.invoke_props_dialog(self, width=380)
+
+    def check(self, context):
+        # Enable live redraw of the dialog as user types
+        return True
 
     def draw(self, context):
         layout = self.layout
         node = get_active_shader_node(context)
+        node_tree = get_target_node_tree(context, node)
         
         box = layout.box()
         box.label(text=f"Target Node: {node.name if node else 'None'}", icon='NODETREE')
@@ -149,6 +247,28 @@ class NPR_OT_ExposeNodeAsParameter(bpy.types.Operator):
         col.separator()
         col.prop(self, "param_name", text="Param Name")
         col.prop(self, "property_key", text="Property Key")
+
+        # Interactive live validation warning inside dialog
+        param_clean = self.param_name.strip()
+        if not param_clean:
+            col.separator()
+            alert_row = col.row()
+            alert_row.alert = True
+            alert_row.label(text="* Param Name is required (cannot be empty)!", icon='ERROR')
+        elif node_tree:
+            existing_names, existing_keys = get_existing_parameters_in_tree(node_tree)
+            if any(param_clean.lower() == name.lower() for name in existing_names):
+                col.separator()
+                alert_row = col.row()
+                alert_row.alert = True
+                alert_row.label(text=f"* Param Name '{param_clean}' already exists in this material!", icon='ERROR')
+            else:
+                prop_key_clean = (self.property_key.strip() if self.property_key.strip() else _format_property_key(param_clean)).replace(" ", "_")
+                if any(prop_key_clean.lower() == k.lower() for k in existing_keys):
+                    col.separator()
+                    alert_row = col.row()
+                    alert_row.alert = True
+                    alert_row.label(text=f"* Property Key '{prop_key_clean}' already exists in this material!", icon='ERROR')
 
     def execute(self, context):
         node = get_active_shader_node(context)
@@ -170,23 +290,32 @@ class NPR_OT_ExposeNodeAsParameter(bpy.types.Operator):
             return {'CANCELLED'}
 
         # Determine node tree
-        sdata = getattr(context, "space_data", None)
-        node_tree = getattr(sdata, "edit_tree", None) if sdata else None
-        if not node_tree:
-            obj = getattr(context, "active_object", None)
-            if obj and getattr(obj, "active_material", None) and obj.active_material.node_tree:
-                node_tree = obj.active_material.node_tree
-            elif hasattr(node, "id_data") and hasattr(node.id_data, "node_tree"):
-                node_tree = node.id_data.node_tree
-
+        node_tree = get_target_node_tree(context, node)
         if not node_tree:
             self.report({'ERROR'}, "Could not determine active shader node tree.")
             return {'CANCELLED'}
 
-        # Ensure property key starts with mi_
-        prop_key = _sanitize_key(self.property_key or self.param_name)
+        # 1. Validation: Param Name cannot be empty
+        param_clean = self.param_name.strip()
+        if not param_clean:
+            self.report({'WARNING'}, "Param Name is required and cannot be empty!")
+            return {'CANCELLED'}
 
-        # Extract current default value from socket
+        # 2. Validation: Param Name cannot be duplicate on the same material
+        existing_names, existing_keys = get_existing_parameters_in_tree(node_tree)
+        if any(param_clean.lower() == name.lower() for name in existing_names):
+            self.report({'WARNING'}, f"Param Name '{param_clean}' already exists in this material! Please enter a unique name.")
+            return {'CANCELLED'}
+
+        # 3. Property Key: user override or auto-generated with mi_ prefix, spaces replaced with '_'
+        prop_key_clean = (self.property_key.strip() if self.property_key.strip() else _format_property_key(param_clean)).replace(" ", "_")
+
+        # 4. Validation: Property Key cannot be duplicate on the same material
+        if any(prop_key_clean.lower() == k.lower() for k in existing_keys):
+            self.report({'WARNING'}, f"Property Key '{prop_key_clean}' already exists in this material! Please use a unique property key.")
+            return {'CANCELLED'}
+
+        # Extract current initial value from socket BEFORE linking
         default_val = get_socket_default_value(target_sock)
 
         # Wire Attribute node
@@ -194,11 +323,11 @@ class NPR_OT_ExposeNodeAsParameter(bpy.types.Operator):
             node_tree=node_tree,
             target_node=node,
             target_socket=target_sock,
-            param_name=self.param_name,
-            prop_key=prop_key
+            param_name=param_clean,
+            prop_key=prop_key_clean
         )
 
-        # Invalidate / set object custom property so viewport reflects the value immediately
+        # Configure custom property on target objects with exact initial value and UI metadata (default, min, max, subtype)
         target_objs = set()
         if context.active_object:
             target_objs.add(context.active_object)
@@ -211,18 +340,46 @@ class NPR_OT_ExposeNodeAsParameter(bpy.types.Operator):
                 target_objs.add(o)
 
         for o in target_objs:
-            if prop_key not in o or o == context.active_object:
-                o[prop_key] = default_val
+            configure_custom_property_on_object(
+                obj=o,
+                prop_key=prop_key_clean,
+                val=default_val,
+                socket=target_sock,
+                description=f"Material Instance: {param_clean}"
+            )
+
+        # Force dependency graph, viewport renderer, and UI to evaluate the new custom property immediately
+        for o in target_objs:
+            try:
+                o.update_tag(refresh={'DATA', 'OBJECT'})
+            except TypeError:
+                o.update_tag()
+
+        if node_tree:
+            node_tree.update_tag()
+            if hasattr(node_tree, "id_data") and node_tree.id_data:
+                node_tree.id_data.update_tag()
+
+        if hasattr(context, "view_layer") and context.view_layer:
+            context.view_layer.update()
+
+        wm = getattr(context, "window_manager", None)
+        if wm:
+            for win in wm.windows:
+                if win.screen:
+                    for area in win.screen.areas:
+                        if area.type in ('VIEW_3D', 'NODE_EDITOR', 'PROPERTIES'):
+                            area.tag_redraw()
 
         # Add to scene registry of exposed parameters
         scene_props = getattr(context.scene, "npr_scene_props", None)
         if scene_props:
             entry = scene_props.exposed_params.add()
-            entry.param_name = self.param_name
-            entry.property_key = prop_key
+            entry.param_name = param_clean
+            entry.property_key = prop_key_clean
             entry.param_type = 'COLOR' if target_sock.type in ('RGBA', 'VECTOR') else 'FLOAT'
 
-        self.report({'INFO'}, f"Successfully exposed '{self.param_name}' as parameter [{prop_key}]!")
+        self.report({'INFO'}, f"Successfully exposed '{param_clean}' as parameter [{prop_key_clean}]!")
         return {'FINISHED'}
 
 class NPR_OT_UnexposeParameter(bpy.types.Operator):
