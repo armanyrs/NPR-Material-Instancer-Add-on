@@ -11,3 +11,8 @@ $RECYCLE.BIN/
 # Windows shortcuts
 *.lnk
 *.blend1
+
+### Python
+__pycache__/
+*.py[cod]
+*$py.class
