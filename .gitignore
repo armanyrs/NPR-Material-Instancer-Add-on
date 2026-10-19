@@ -16,3 +16,7 @@ $RECYCLE.BIN/
 __pycache__/
 *.py[cod]
 *$py.class
+
+### Build / Releases
+dist/
+*.zip

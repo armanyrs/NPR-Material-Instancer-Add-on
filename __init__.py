@@ -8,7 +8,7 @@ Simple, focused tool:
 bl_info = {
     "name": "Universal Material Instancer",
     "author": "Armany Saputra",
-    "version": (1, 3, 0),
+    "version": (1, 0, 0),
     "blender": (3, 6, 0),
     "location": "Shader Editor > Sidebar (N-Panel) > Material Instancer",
     "description": "Expose any shader node socket as an object custom property with 0ms compilation",
