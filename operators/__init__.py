@@ -3,6 +3,7 @@ import bpy
 from .expose_parameter import (
     NPR_OT_ExposeNodeAsParameter,
     NPR_OT_UnexposeParameter,
+    NPR_OT_CleanUnusedProperties,
     draw_npr_node_context_menu,
 )
 from .jump_to_custom_props import (
@@ -12,6 +13,7 @@ from .jump_to_custom_props import (
 classes = (
     NPR_OT_ExposeNodeAsParameter,
     NPR_OT_UnexposeParameter,
+    NPR_OT_CleanUnusedProperties,
     MATERIAL_OT_JumpToCustomProps,
 )
 

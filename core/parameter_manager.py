@@ -74,13 +74,96 @@ def expose_socket_as_parameter(node_tree, target_node, target_socket, param_name
 
 def unexpose_parameter(node_tree, prop_key):
     """
-    Removes an exposed attribute node from the Master Material tree.
+    Removes all exposed attribute nodes with prop_key from the Master Material tree.
     """
-    if not node_tree:
+    if not node_tree or not hasattr(node_tree, "nodes"):
         return False, "Node tree is None."
-        
-    attr_node = find_attribute_node_by_name(node_tree, prop_key)
-    if attr_node:
-        node_tree.nodes.remove(attr_node)
-        return True, f"Removed exposed parameter '{prop_key}'"
+
+    removed_nodes = [
+        node for node in node_tree.nodes
+        if node.type == 'ATTRIBUTE' and getattr(node, "attribute_name", "") == prop_key
+    ]
+    for node in removed_nodes:
+        node_tree.nodes.remove(node)
+
+    if removed_nodes:
+        return True, f"Removed {len(removed_nodes)} exposed attribute node(s) for '{prop_key}'"
     return False, f"Attribute node for '{prop_key}' not found."
+
+def object_has_active_attribute(obj, prop_key):
+    """Checks if any material currently assigned to obj uses an Attribute node for prop_key."""
+    materials = []
+    if hasattr(obj, "material_slots"):
+        materials.extend([s.material for s in obj.material_slots if s.material])
+    elif hasattr(obj, "data") and hasattr(obj.data, "materials"):
+        materials.extend([m for m in obj.data.materials if m])
+
+    for mat in materials:
+        if mat and mat.node_tree and hasattr(mat.node_tree, "nodes"):
+            for n in mat.node_tree.nodes:
+                if n.type == 'ATTRIBUTE' and getattr(n, "attribute_name", "") == prop_key:
+                    return True
+    return False
+
+def cleanup_custom_property_from_objects(node_tree, prop_key, context=None):
+    """
+    Removes custom property `prop_key` from all objects in bpy.data.objects
+    that no longer have any active material requiring it.
+    """
+    cleaned_count = 0
+    for obj in bpy.data.objects:
+        if prop_key in obj:
+            if not object_has_active_attribute(obj, prop_key):
+                try:
+                    del obj[prop_key]
+                    cleaned_count += 1
+                except (KeyError, RuntimeError):
+                    pass
+                if "_RNA_UI" in obj and prop_key in obj["_RNA_UI"]:
+                    try:
+                        del obj["_RNA_UI"][prop_key]
+                    except (KeyError, RuntimeError):
+                        pass
+
+    # Tag redraw on relevant editors
+    wm = getattr(context, "window_manager", None) if context else getattr(bpy.context, "window_manager", None)
+    if wm:
+        for win in wm.windows:
+            if win.screen:
+                for area in win.screen.areas:
+                    if area.type in ('PROPERTIES', 'NODE_EDITOR', 'VIEW_3D'):
+                        area.tag_redraw()
+
+    return cleaned_count
+
+def purge_all_unused_properties(context=None):
+    """
+    Purges all custom properties starting with 'mi_' across all objects
+    that are not actively used by any assigned shader node.
+    """
+    cleaned_total = 0
+    for obj in bpy.data.objects:
+        mi_keys = [k for k in obj.keys() if k.startswith("mi_")]
+        for key in mi_keys:
+            if not object_has_active_attribute(obj, key):
+                try:
+                    del obj[key]
+                    cleaned_total += 1
+                except (KeyError, RuntimeError):
+                    pass
+                if "_RNA_UI" in obj and key in obj["_RNA_UI"]:
+                    try:
+                        del obj["_RNA_UI"][key]
+                    except (KeyError, RuntimeError):
+                        pass
+
+    wm = getattr(context, "window_manager", None) if context else getattr(bpy.context, "window_manager", None)
+    if wm:
+        for win in wm.windows:
+            if win.screen:
+                for area in win.screen.areas:
+                    if area.type in ('PROPERTIES', 'NODE_EDITOR', 'VIEW_3D'):
+                        area.tag_redraw()
+
+    return cleaned_total
+

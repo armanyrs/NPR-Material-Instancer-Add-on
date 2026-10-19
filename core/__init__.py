@@ -4,6 +4,8 @@ from .parameter_manager import (
     expose_socket_as_parameter,
     unexpose_parameter,
     get_socket_default_value,
+    cleanup_custom_property_from_objects,
+    purge_all_unused_properties,
 )
 
 __all__ = [
@@ -11,4 +13,6 @@ __all__ = [
     "expose_socket_as_parameter",
     "unexpose_parameter",
     "get_socket_default_value",
+    "cleanup_custom_property_from_objects",
+    "purge_all_unused_properties",
 ]

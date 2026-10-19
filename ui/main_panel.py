@@ -57,6 +57,23 @@ class MI_PT_MainPanel(bpy.types.Panel):
                 op_del = row.operator("npr.unexpose_parameter", text="", icon='X')
                 op_del.property_key = attr_key
 
+        # Unused / Dangling Custom Properties (if any)
+        dangling_keys = [k for k in obj.keys() if k.startswith("mi_") and k not in exposed]
+        if dangling_keys:
+            layout.separator()
+            box_unused = layout.box()
+            row_u = box_unused.row(align=True)
+            row_u.label(text=f"Unused Properties ({len(dangling_keys)})", icon='INFO')
+            op_clean_all = row_u.operator("npr.clean_unused_properties", text="Clean All", icon='TRASH')
+            op_clean_all.property_key = ""
+
+            col_u = box_unused.column(align=True)
+            for dk in dangling_keys:
+                row_dk = col_u.row(align=True)
+                row_dk.label(text=dk, icon='DOT')
+                op_dk = row_dk.operator("npr.clean_unused_properties", text="", icon='X')
+                op_dk.property_key = dk
+
         layout.separator()
 
         # Direct button to jump to Object > Custom Properties

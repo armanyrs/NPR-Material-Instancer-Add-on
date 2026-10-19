@@ -35,17 +35,21 @@ def run_tests():
         npr_addon.register()
         print("  ✓ Add-on registered successfully.")
 
-        # 2. Test Object Creation with a Material
-        print("\n[STEP 2] Creating Object and Material...")
-        bpy.ops.mesh.primitive_cube_add(location=(0, 0, 0))
-        cube = bpy.context.active_object
-        cube.name = "Test_Cube"
-        
+        # 2. Test Object Creation with a Material (3 Cubes Sharing Master Material)
+        print("\n[STEP 2] Creating 3 Cubes Sharing Master Material...")
+        cubes = []
         custom_mat = bpy.data.materials.new(name="PBR_Material")
         if hasattr(custom_mat, "use_nodes"):
             custom_mat.use_nodes = True
-        cube.data.materials.append(custom_mat)
-        print(f"  ✓ Created '{cube.name}' with material '{custom_mat.name}'.")
+
+        for i in range(3):
+            bpy.ops.mesh.primitive_cube_add(location=(i * 3, 0, 0))
+            c = bpy.context.active_object
+            c.name = f"Test_Cube_{i+1}"
+            c.data.materials.append(custom_mat)
+            cubes.append(c)
+
+        print(f"  ✓ Created 3 cubes sharing material '{custom_mat.name}'.")
 
         # 3. Test Unreal-Style 'Convert to Parameter' (Right-Click Expose)
         print("\n[STEP 3] Testing 'Convert to Parameter' on Principled BSDF...")
@@ -75,15 +79,17 @@ def run_tests():
                 assert n.outputs['Color'].is_linked, "Attribute node Color output must be linked"
                 break
         assert attr_found is True, "ShaderNodeAttribute for 'mi_base_color' must exist"
-        assert "mi_base_color" in cube, "Custom property 'mi_base_color' must exist on object"
-        print("  ✓ 'Convert to Parameter' successfully exposed socket to Object Custom Property [mi_base_color]!")
+        
+        for c in cubes:
+            assert "mi_base_color" in c, f"Custom property 'mi_base_color' must exist on {c.name}"
+        print("  ✓ 'Convert to Parameter' successfully exposed socket and initialized [mi_base_color] across ALL 3 cubes!")
 
-        # 4. Test Live Parameter Tweaking on Object
+        # 4. Test Live Parameter Tweaking on Objects
         print("\n[STEP 4] Testing Parameter Tweaking on Object Custom Property...")
-        new_color = [0.85, 0.15, 0.45, 1.0]
-        cube["mi_base_color"] = new_color
-        assert list(cube["mi_base_color"]) == new_color, "Custom property update mismatch"
-        print(f"  ✓ Updated cube['mi_base_color'] -> {new_color}")
+        cubes[0]["mi_base_color"] = [1.0, 0.0, 0.0, 1.0] # Red
+        cubes[1]["mi_base_color"] = [0.0, 1.0, 0.0, 1.0] # Green
+        cubes[2]["mi_base_color"] = [0.0, 0.0, 1.0, 1.0] # Blue
+        print("  ✓ Tweaked distinct color instances on all 3 cubes.")
 
         # 5. Test Shortcut to Object > Custom Properties
         print("\n[STEP 5] Testing 'Jump to Custom Properties' Operator...")
@@ -91,8 +97,34 @@ def run_tests():
         assert jump_res == {'FINISHED'}, "Jump to custom props operator failed"
         print("  ✓ 'Jump to Custom Properties' operator executed successfully.")
 
-        # 6. Test Clean Unregistration
-        print("\n[STEP 6] Testing Clean Unregistration...")
+        # 6. Test Unexpose Parameter (Delete [X] from Panel N)
+        print("\n[STEP 6] Testing 'Unexpose Parameter' (Clicking [X])...")
+        unexpose_res = bpy.ops.npr.unexpose_parameter(property_key="mi_base_color")
+        assert unexpose_res == {'FINISHED'}, f"Unexpose operator failed: {unexpose_res}"
+
+        # Verify Attribute node is removed
+        for n in custom_mat.node_tree.nodes:
+            if n.type == 'ATTRIBUTE':
+                assert n.attribute_name != "mi_base_color", "Attribute node must be removed"
+        print("  ✓ Attribute node removed from shader graph.")
+
+        # Verify property is removed from ALL 3 cubes
+        for c in cubes:
+            assert "mi_base_color" not in c, f"Custom property 'mi_base_color' must NOT be stuck on {c.name}"
+        print("  ✓ Custom property [mi_base_color] cleanly deleted from ALL 3 cubes (bug fixed)!")
+
+        # 7. Test Purging Dangling/Unused Properties
+        print("\n[STEP 7] Testing Purge Dangling/Unused Properties Operator...")
+        cubes[0]["mi_dangling_prop"] = 0.5
+        cubes[1]["mi_dangling_prop"] = 0.7
+        clean_res = bpy.ops.npr.clean_unused_properties()
+        assert clean_res == {'FINISHED'}, f"Clean unused operator failed: {clean_res}"
+        for c in cubes:
+            assert "mi_dangling_prop" not in c, f"Dangling property must be purged from {c.name}"
+        print("  ✓ Cleaned unused properties cleanly.")
+
+        # 8. Test Clean Unregistration
+        print("\n[STEP 8] Testing Clean Unregistration...")
         npr_addon.unregister()
         print("  ✓ Cleanly unregistered.")
 

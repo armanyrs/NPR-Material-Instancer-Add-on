@@ -5,7 +5,13 @@ its sockets as instance-driven parameters with clean, intuitive naming.
 """
 import bpy
 import re
-from ..core.parameter_manager import expose_socket_as_parameter, unexpose_parameter, get_socket_default_value
+from ..core.parameter_manager import (
+    expose_socket_as_parameter,
+    unexpose_parameter,
+    get_socket_default_value,
+    cleanup_custom_property_from_objects,
+    purge_all_unused_properties,
+)
 
 def _clean_socket_name(sock_name, node):
     """Generates an intuitive parameter name without unnecessary node type clutter."""
@@ -193,8 +199,20 @@ class NPR_OT_ExposeNodeAsParameter(bpy.types.Operator):
         )
 
         # Invalidate / set object custom property so viewport reflects the value immediately
+        target_objs = set()
         if context.active_object:
-            context.active_object[prop_key] = default_val
+            target_objs.add(context.active_object)
+        for sel in getattr(context, "selected_objects", []):
+            target_objs.add(sel)
+        for o in bpy.data.objects:
+            if hasattr(o, "material_slots") and any(s.material and s.material.node_tree == node_tree for s in o.material_slots):
+                target_objs.add(o)
+            elif hasattr(o, "data") and hasattr(o.data, "materials") and any(m and m.node_tree == node_tree for m in o.data.materials):
+                target_objs.add(o)
+
+        for o in target_objs:
+            if prop_key not in o or o == context.active_object:
+                o[prop_key] = default_val
 
         # Add to scene registry of exposed parameters
         scene_props = getattr(context.scene, "npr_scene_props", None)
@@ -208,7 +226,7 @@ class NPR_OT_ExposeNodeAsParameter(bpy.types.Operator):
         return {'FINISHED'}
 
 class NPR_OT_UnexposeParameter(bpy.types.Operator):
-    """Removes an exposed attribute parameter from the Master Material"""
+    """Removes an exposed attribute parameter from the Master Material and object custom properties"""
     bl_idname = "npr.unexpose_parameter"
     bl_label = "Unexpose Parameter"
     bl_options = {'REGISTER', 'UNDO'}
@@ -225,19 +243,47 @@ class NPR_OT_UnexposeParameter(bpy.types.Operator):
             self.report({'ERROR'}, "Active node tree not found.")
             return {'CANCELLED'}
 
+        # 1. Remove attribute node from shader node tree
         success, msg = unexpose_parameter(node_tree, self.property_key)
-        if success:
-            scene_props = getattr(context.scene, "npr_scene_props", None)
-            if scene_props:
-                for idx, item in enumerate(scene_props.exposed_params):
-                    if item.property_key == self.property_key:
-                        scene_props.exposed_params.remove(idx)
-                        break
 
-            self.report({'INFO'}, msg)
+        # 2. Clean custom property from all objects sharing the material / scene
+        cleaned_count = cleanup_custom_property_from_objects(node_tree, self.property_key, context)
+
+        # 3. Clean scene registry entry if present
+        scene_props = getattr(context.scene, "npr_scene_props", None)
+        if scene_props:
+            for idx, item in enumerate(scene_props.exposed_params):
+                if item.property_key == self.property_key:
+                    scene_props.exposed_params.remove(idx)
+                    break
+
+        if success or cleaned_count > 0:
+            self.report({'INFO'}, f"Removed parameter '{self.property_key}' (Cleaned from {cleaned_count} object(s)).")
             return {'FINISHED'}
+
         self.report({'WARNING'}, msg)
         return {'CANCELLED'}
+
+class NPR_OT_CleanUnusedProperties(bpy.types.Operator):
+    """Purges Material Instancer custom properties (mi_*) not used by any assigned shader node"""
+    bl_idname = "npr.clean_unused_properties"
+    bl_label = "Clean Unused Properties"
+    bl_options = {'REGISTER', 'UNDO'}
+
+    property_key: bpy.props.StringProperty(name="Property Key", default="")
+
+    def execute(self, context):
+        if self.property_key:
+            sdata = getattr(context, "space_data", None)
+            node_tree = getattr(sdata, "edit_tree", None) if sdata else None
+            if not node_tree and context.active_object and context.active_object.active_material:
+                node_tree = context.active_object.active_material.node_tree
+            count = cleanup_custom_property_from_objects(node_tree, self.property_key, context)
+            self.report({'INFO'}, f"Cleaned unused property '{self.property_key}' from {count} object(s).")
+        else:
+            total = purge_all_unused_properties(context)
+            self.report({'INFO'}, f"Purged {total} unused Material Instancer property/properties.")
+        return {'FINISHED'}
 
 def draw_npr_node_context_menu(self, context):
     """Draws 'Convert to Parameter' inside Shader Editor's right-click context menu."""
